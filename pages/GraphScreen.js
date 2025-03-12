@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator, StyleSheet, Dimensions, ScrollView } from 'react-native';
+import { View, Text, ActivityIndicator, StyleSheet, Dimensions, ScrollView, Button } from 'react-native';
 import { BarChart, LineChart } from 'react-native-chart-kit';
 import Papa from 'papaparse';
 
@@ -50,6 +50,8 @@ const GraphScreen = ({ route }) => {
   const [dailyData, setDailyData] = useState([]);
   const [hourlyData, setHourlyData] = useState([]); // New state for hourly data
   const [delhiData, setDelhiData] = useState(null);
+  const [viewMode, setViewMode] = useState('daily'); // Add this line
+  const [selectedGraph, setSelectedGraph] = useState("pm2.5cnc"); // Add this line
 
   const fetchDelhiData = async () => {
     try {
@@ -89,11 +91,62 @@ const GraphScreen = ({ route }) => {
     const fetchData = async () => {
       try {
         const API_URL = `http://atmos.urbansciences.in/adp/v4/getDeviceDataParam/imei/${siteId}/params/pm2.5cnc,pm10cnc/startdate/${startDate}/enddate/${endDate}/ts/mm/avg/15/api/63h3AckbgtY?gaps=1&gap_value=NaN`;
+        console.log("Fetching data from:", API_URL);
         const response = await fetch(API_URL);
         const csvData = await response.text();
         const parsedData = Papa.parse(csvData, { header: true, skipEmptyLines: true });
         
-        // Group data by date and find maximum values
+        console.log("Total data points:", parsedData.data.length);
+
+        // Process hourly data first
+        const now = new Date();
+        const twelveHoursAgo = new Date(now.getTime() - (12 * 60 * 60 * 1000));
+        
+        console.log("Filtering data from:", twelveHoursAgo, "to:", now);
+
+        const todaysData = parsedData.data.filter(item => {
+          if (item["pm2.5cnc"] === "NaN" || item["pm10cnc"] === "NaN") return false;
+          const itemDate = new Date(item.dt_time);
+          return itemDate >= twelveHoursAgo;
+        });
+
+        console.log("Filtered hourly data points:", todaysData.length);
+
+        // Group by hour with proper time handling
+        const hourlyGrouped = todaysData.reduce((acc, curr) => {
+          const itemDate = new Date(curr.dt_time);
+          const hour = itemDate.getHours();
+          const pm25 = parseFloat(curr["pm2.5cnc"]);
+          const pm10 = parseFloat(curr["pm10cnc"]);
+          
+          if (!acc[hour]) {
+            acc[hour] = {
+              pm25Values: [pm25],
+              pm10Values: [pm10],
+              hour: hour,
+              count: 1
+            };
+          } else {
+            acc[hour].pm25Values.push(pm25);
+            acc[hour].pm10Values.push(pm10);
+            acc[hour].count++;
+          }
+          return acc;
+        }, {});
+
+        // Calculate hourly averages
+        const processedHourlyData = Object.entries(hourlyGrouped)
+          .map(([hour, values]) => ({
+            hour: parseInt(hour),
+            pm25: values.pm25Values.reduce((a, b) => a + b) / values.count,
+            pm10: values.pm10Values.reduce((a, b) => a + b) / values.count
+          }))
+          .sort((a, b) => a.hour - b.hour);
+
+        console.log("Processed hourly data:", processedHourlyData);
+        setHourlyData(processedHourlyData);
+
+        // Group data by date and calculate averages
         const groupedData = parsedData.data.reduce((acc, curr) => {
           if (curr["pm2.5cnc"] === "NaN" || curr["pm10cnc"] === "NaN") return acc;
           
@@ -103,58 +156,27 @@ const GraphScreen = ({ route }) => {
           
           if (!acc[date]) {
             acc[date] = {
-              pm25: pm25,
-              pm10: pm10,
-              timestamp: curr.dt_time
+              pm25: [pm25],
+              pm10: [pm10],
+              timestamp: curr.dt_time,
+              count: 1
             };
           } else {
-            // Update if current value is higher
-            if (pm25 > acc[date].pm25) {
-              acc[date].pm25 = pm25;
-              acc[date].timestamp = curr.dt_time;
-            }
-            if (pm10 > acc[date].pm10) {
-              acc[date].pm10 = pm10;
-            }
+            acc[date].pm25.push(pm25);
+            acc[date].pm10.push(pm10);
+            acc[date].count++;
           }
           return acc;
         }, {});
 
-        // Transform to array with maximum values
+        // Calculate daily averages
         const processedData = Object.entries(groupedData).map(([date, values]) => ({
           date,
-          pm25: values.pm25,
-          pm10: values.pm10,
+          pm25: values.pm25.reduce((a, b) => a + b) / values.count,
+          pm10: values.pm10.reduce((a, b) => a + b) / values.count,
           timestamp: values.timestamp
         }));
 
-        // Process hourly data for current date with maximum values
-        const currentDate = new Date().toISOString().split('T')[0];
-        const todaysData = parsedData.data.filter(item => 
-          item.dt_time.startsWith(currentDate) && 
-          item["pm2.5cnc"] !== "NaN" && 
-          item["pm10cnc"] !== "NaN"
-        );
-
-        // Group hourly data and find maximum values
-        const hourlyGrouped = todaysData.reduce((acc, curr) => {
-          const hour = curr.dt_time.split(' ')[1].substring(0, 2);
-          const pm25 = parseFloat(curr["pm2.5cnc"]);
-          const pm10 = parseFloat(curr["pm10cnc"]);
-          
-          if (!acc[hour]) {
-            acc[hour] = { pm25, pm10, time: curr.dt_time.split(' ')[1] };
-          } else if (pm25 > acc[hour].pm25) {
-            acc[hour].pm25 = pm25;
-            acc[hour].pm10 = pm10;
-            acc[hour].time = curr.dt_time.split(' ')[1];
-          }
-          return acc;
-        }, {});
-
-        const processedHourlyData = Object.values(hourlyGrouped);
-
-        setHourlyData(processedHourlyData);
         setDailyData(processedData);
         await fetchDelhiData();
       } catch (error) {
@@ -273,55 +295,73 @@ const GraphScreen = ({ route }) => {
   };
 
   const renderHourlyChart = () => {
-    if (!hourlyData.length) return null;
+    console.log("Rendering hourly chart with data:", hourlyData);
+    
+    if (!hourlyData.length) {
+      console.log("No hourly data available");
+      return (
+        <View style={styles.chartContainer}>
+          <Text style={styles.chartTitle}>No hourly data available</Text>
+        </View>
+      );
+    }
 
-    const hourlyChartData = {
-      labels: hourlyData.map(item => item.time),
-      datasets: [
-        {
-          data: hourlyData.map(item => item.pm25),
-          color: (opacity = 1) => `rgba(255, 107, 107, ${opacity})`,
-          strokeWidth: 2,
-          label: 'PM2.5'
-        }
-      ],
-      legend: ['PM2.5']
+    const dataPoints = hourlyData.length;
+    const chartWidth = Math.max(screenWidth, dataPoints * 60);
+    
+    const interval = Math.max(1, Math.floor(dataPoints / 8));
+    const labels = hourlyData.map((item, index) => 
+      index % interval === 0 ? `${String(item.hour).padStart(2, '0')}:00` : ""
+    );
+
+    const chartData = {
+      labels: labels,
+      datasets: [{ 
+        data: hourlyData.map(item => 
+          selectedGraph === "pm2.5cnc" ? item.pm25 : item.pm10
+        )
+      }],
     };
 
-    // Find peak hours
-    const peakHour = hourlyData.reduce((max, item) => 
-      item.pm25 > max.pm25 ? item : max
-    , hourlyData[0]);
+    const chartConfig = {
+      backgroundGradientFrom: "#f5f5f5",
+      backgroundGradientTo: "#ffffff",
+      decimalPlaces: 1,
+      color: () => "black",
+      labelColor: () => "black",
+      barPercentage: 0.6,
+      fillShadowGradient: "blue",
+      fillShadowGradientOpacity: 1,
+    };
 
     return (
       <View style={styles.chartContainer}>
-        <Text style={styles.chartTitle}>Today's Hourly PM2.5 Levels</Text>
-        <Text style={styles.peakHourText}>
-          Peak pollution at {peakHour.time} ({peakHour.pm25.toFixed(1)} µg/m³)
-        </Text>
+        <Text style={styles.chartTitle}>Last 12 Hours Air Quality Data</Text>
         
+        <View style={styles.buttonContainer}>
+          <Button
+            title="PM2.5"
+            onPress={() => setSelectedGraph("pm2.5cnc")}
+            color={selectedGraph === "pm2.5cnc" ? "blue" : "gray"}
+          />
+          <Button
+            title="PM10"
+            onPress={() => setSelectedGraph("pm10cnc")}
+            color={selectedGraph === "pm10cnc" ? "green" : "gray"}
+          />
+        </View>
+
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <BarChart
-            data={hourlyChartData}
-            width={Math.max(screenWidth - 32, hourlyData.length * 50)}
+            data={chartData}
+            width={chartWidth}
             height={220}
-            chartConfig={{
-              backgroundColor: '#ffffff',
-              backgroundGradientFrom: '#ffffff',
-              backgroundGradientTo: '#ffffff',
-              decimalPlaces: 0,
-              color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              style: { borderRadius: 16 },
-              propsForBackgroundLines: {
-                strokeDasharray: ''
-              }
-            }}
-            style={styles.chart}
+            chartConfig={chartConfig}
             showValuesOnTopOfBars
           />
         </ScrollView>
-
+        
+        {/* Keep existing time analysis section */}
         <View style={styles.timeAnalysis}>
           <Text style={styles.analysisTitle}>Time-based Analysis</Text>
           <Text style={styles.analysisText}>
@@ -335,14 +375,32 @@ const GraphScreen = ({ route }) => {
   };
 
   const calculateAveragePM25 = (startTime, endTime) => {
-    const filteredData = hourlyData.filter(item => 
-      item.time >= startTime && item.time <= endTime
-    );
+    const filteredData = hourlyData.filter(item => {
+      const itemTime = item.time.toISOString().split('T')[1].substring(0, 5);
+      return itemTime >= startTime && itemTime <= endTime;
+    });
     if (!filteredData.length) return 'N/A';
     const avg = filteredData.reduce((sum, item) => sum + item.pm25, 0) / filteredData.length;
     return avg.toFixed(1);
   };
 
+  // Add view toggle buttons right after the health card
+  const renderViewToggle = () => (
+    <View style={styles.toggleContainer}>
+      <Button
+        title="Daily View"
+        onPress={() => setViewMode('daily')}
+        color={viewMode === 'daily' ? '#4CAF50' : '#888'}
+      />
+      <Button
+        title="Hourly View"
+        onPress={() => setViewMode('hourly')}
+        color={viewMode === 'hourly' ? '#4CAF50' : '#888'}
+      />
+    </View>
+  );
+
+  // Modify the return statement to use the view toggle
   return (
     <ScrollView style={styles.container}>
       <View style={styles.header}>
@@ -358,34 +416,36 @@ const GraphScreen = ({ route }) => {
         <Text style={styles.healthAdvice}>{healthRec.advice}</Text>
       </View>
 
-      {renderHourlyChart()}
-
-      <View style={styles.chartContainer}>
-        <Text style={styles.chartTitle}>7-Day PM2.5 & PM10 Trends</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <BarChart
-            data={chartData}
-            width={Math.max(screenWidth - 32, dailyData.length * 100)}
-            height={220}
-            chartConfig={{
-              backgroundColor: '#ffffff',
-              backgroundGradientFrom: '#ffffff',
-              backgroundGradientTo: '#ffffff',
-              decimalPlaces: 0,
-              color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              style: {
-                borderRadius: 16
-              },
-              propsForBackgroundLines: {
-                strokeDasharray: ''
-              }
-            }}
-            style={styles.chart}
-            showValuesOnTopOfBars
-          />
-        </ScrollView>
-      </View>
+      {renderViewToggle()}
+      
+      {viewMode === 'hourly' ? renderHourlyChart() : (
+        <View style={styles.chartContainer}>
+          <Text style={styles.chartTitle}>7-Day PM2.5 & PM10 Trends (Average)</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <BarChart
+              data={chartData}
+              width={Math.max(screenWidth - 32, dailyData.length * 100)}
+              height={220}
+              chartConfig={{
+                backgroundColor: '#ffffff',
+                backgroundGradientFrom: '#ffffff',
+                backgroundGradientTo: '#ffffff',
+                decimalPlaces: 0,
+                color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
+                labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
+                style: {
+                  borderRadius: 16
+                },
+                propsForBackgroundLines: {
+                  strokeDasharray: ''
+                }
+              }}
+              style={styles.chart}
+              showValuesOnTopOfBars
+            />
+          </ScrollView>
+        </View>
+      )}
 
       {renderComparison()}
 
@@ -555,6 +615,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     lineHeight: 24
+  },
+  toggleContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    padding: 16,
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginTop: 16,
+    borderRadius: 12,
+    elevation: 2
+  },
+  buttonContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 16,
   }
 });
 
