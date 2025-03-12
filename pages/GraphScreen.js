@@ -98,48 +98,46 @@ const GraphScreen = ({ route }) => {
         
         console.log("Total data points:", parsedData.data.length);
 
-        // Process hourly data first
+        // Process hourly data including previous day
         const now = new Date();
-        const twelveHoursAgo = new Date(now.getTime() - (12 * 60 * 60 * 1000));
-        
-        console.log("Filtering data from:", twelveHoursAgo, "to:", now);
+        const twentyFourHoursAgo = new Date(now.getTime() - (24 * 60 * 60 * 1000)); // Get last 24 hours
+        console.log("Filtering data from:", twentyFourHoursAgo, "to:", now);
 
-        const todaysData = parsedData.data.filter(item => {
-          if (item["pm2.5cnc"] === "NaN" || item["pm10cnc"] === "NaN") return false;
-          const itemDate = new Date(item.dt_time);
-          return itemDate >= twelveHoursAgo;
+        // Sort data by datetime first
+        const sortedData = parsedData.data
+          .filter(item => item["pm2.5cnc"] !== "NaN" && item["pm10cnc"] !== "NaN")
+          .map(item => ({
+            ...item,
+            datetime: new Date(item.dt_time.replace(' ', 'T'))
+          }))
+          .sort((a, b) => b.datetime - a.datetime);
+
+        // Get last 12 data points for each hour
+        const hourlyMap = new Map();
+        sortedData.forEach(item => {
+          const hour = item.datetime.getHours();
+          if (!hourlyMap.has(hour)) {
+            hourlyMap.set(hour, {
+              hour,
+              pm25Values: [],
+              pm10Values: [],
+              lastUpdate: item.datetime
+            });
+          }
+          const hourData = hourlyMap.get(hour);
+          if (hourData.pm25Values.length < 4) { // Take up to 4 readings per hour (15-min intervals)
+            hourData.pm25Values.push(parseFloat(item["pm2.5cnc"]));
+            hourData.pm10Values.push(parseFloat(item["pm10cnc"]));
+          }
         });
 
-        console.log("Filtered hourly data points:", todaysData.length);
-
-        // Group by hour with proper time handling
-        const hourlyGrouped = todaysData.reduce((acc, curr) => {
-          const itemDate = new Date(curr.dt_time);
-          const hour = itemDate.getHours();
-          const pm25 = parseFloat(curr["pm2.5cnc"]);
-          const pm10 = parseFloat(curr["pm10cnc"]);
-          
-          if (!acc[hour]) {
-            acc[hour] = {
-              pm25Values: [pm25],
-              pm10Values: [pm10],
-              hour: hour,
-              count: 1
-            };
-          } else {
-            acc[hour].pm25Values.push(pm25);
-            acc[hour].pm10Values.push(pm10);
-            acc[hour].count++;
-          }
-          return acc;
-        }, {});
-
-        // Calculate hourly averages
-        const processedHourlyData = Object.entries(hourlyGrouped)
-          .map(([hour, values]) => ({
-            hour: parseInt(hour),
-            pm25: values.pm25Values.reduce((a, b) => a + b) / values.count,
-            pm10: values.pm10Values.reduce((a, b) => a + b) / values.count
+        // Convert to array and calculate averages
+        const processedHourlyData = Array.from(hourlyMap.values())
+          .map(({ hour, pm25Values, pm10Values, lastUpdate }) => ({
+            hour,
+            pm25: pm25Values.reduce((a, b) => a + b, 0) / pm25Values.length,
+            pm10: pm10Values.reduce((a, b) => a + b, 0) / pm10Values.length,
+            time: lastUpdate
           }))
           .sort((a, b) => a.hour - b.hour);
 
@@ -298,13 +296,29 @@ const GraphScreen = ({ route }) => {
     console.log("Rendering hourly chart with data:", hourlyData);
     
     if (!hourlyData.length) {
-      console.log("No hourly data available");
       return (
         <View style={styles.chartContainer}>
           <Text style={styles.chartTitle}>No hourly data available</Text>
         </View>
       );
     }
+
+    const formatHour = (hour) => {
+      const ampm = hour >= 12 ? 'PM' : 'AM';
+      const hour12 = hour % 12 || 12;
+      return `${hour12}${ampm}`;
+    };
+
+    const chartData = {
+      labels: hourlyData.map(item => formatHour(item.hour)),
+      datasets: [
+        {
+          data: hourlyData.map(item => 
+            selectedGraph === "pm2.5cnc" ? Math.round(item.pm25 * 10) / 10 : Math.round(item.pm10 * 10) / 10
+          ),
+        }
+      ],
+    };
 
     const dataPoints = hourlyData.length;
     const chartWidth = Math.max(screenWidth, dataPoints * 60);
@@ -314,14 +328,14 @@ const GraphScreen = ({ route }) => {
       index % interval === 0 ? `${String(item.hour).padStart(2, '0')}:00` : ""
     );
 
-    const chartData = {
-      labels: labels,
-      datasets: [{ 
-        data: hourlyData.map(item => 
-          selectedGraph === "pm2.5cnc" ? item.pm25 : item.pm10
-        )
-      }],
-    };
+    // const chartData = {
+    //   labels: labels,
+    //   datasets: [{ 
+    //     data: hourlyData.map(item => 
+    //       selectedGraph === "pm2.5cnc" ? item.pm25 : item.pm10
+    //     )
+    //   }],
+    // };
 
     const chartConfig = {
       backgroundGradientFrom: "#f5f5f5",
